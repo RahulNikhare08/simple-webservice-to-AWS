@@ -2,26 +2,46 @@
 
 A complete CI/CD setup for deploying a Node.js web service to AWS using ECS Fargate with Terraform and GitHub Actions.
 
-## Architecture
+## 🚀 Quick Start
 
-- **VPC**: Public and private subnets across 2 AZs
-- **ECS Fargate**: Containerized Node.js app in private subnets
-- **Application Load Balancer**: HTTPS with self-signed certificate
-- **Secrets Manager**: Database connection string storage
-- **CloudWatch**: CPU and memory alarms
-- **ECR**: Container image registry
-- **S3**: Remote Terraform state storage
+### Option 1: Automated Setup (Recommended)
+```bash
+git clone https://github.com/YOUR_USERNAME/simple-webservice-to-AWS.git
+cd simple-webservice-to-AWS
+./setup.sh
+```
 
-## Features
+### Option 2: Manual Setup
+Follow the detailed setup instructions below.
 
-- ✅ HTTPS with automatic HTTP→HTTPS redirect
-- ✅ Self-signed SSL certificate
-- ✅ Secrets Manager integration
-- ✅ CloudWatch monitoring and alarms
-- ✅ Complete CI/CD pipeline with GitHub Actions
-- ✅ Infrastructure as Code with Terraform
-- ✅ Remote state storage in S3
-- ✅ Automated smoke tests
+## ✨ Features
+
+- 🚀 **One-click deployment** with GitHub Actions
+- 💰 **Cost estimation** before deployment
+- 🛡️ **Smart resource management** (preserves state between deployments)
+- 🔍 **Detailed destruction preview** with cost savings
+- 📊 **Rich deployment summaries** with resource counts
+- ✅ **Automated smoke tests**
+- 🔒 **HTTPS with self-signed certificate**
+- 🔐 **Secrets Manager integration**
+- 📈 **CloudWatch monitoring**
+
+## 💰 Cost Breakdown
+
+| Resource | Monthly Cost | Notes |
+|----------|-------------|-------|
+| ECS Fargate (0.25 vCPU, 0.5GB) | ~$30-50 | Main application |
+| Application Load Balancer | ~$20 | HTTPS endpoint |
+| NAT Gateways (2x) | ~$90 | Internet access for private subnets |
+| Elastic IPs (2x) | ~$7 | For NAT Gateways |
+| Secrets Manager | ~$1 | Database config |
+| CloudWatch Logs | ~$2 | Application logs |
+| **Total** | **~$150-170** | **Per month** |
+
+### 💡 Cost Optimization
+- **Single NAT Gateway**: Save ~$45/month (reduces availability)
+- **Scheduled scaling**: Scale down during off-hours
+- **Spot instances**: For non-critical workloads
 
 ## Prerequisites
 

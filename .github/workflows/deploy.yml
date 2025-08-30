@@ -1,9 +1,15 @@
-name: Deploy to AWS
+name: 🚀 Deploy to AWS
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      show_cost_estimate:
+        description: 'Show cost estimate before deployment'
+        required: false
+        default: 'true'
+        type: boolean
 
 jobs:
   deploy:
@@ -13,85 +19,135 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: 🔐 Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: us-east-1
 
-      - name: Setup Terraform
+      - name: 🛠️ Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.6
 
-      - name: Terraform Init
+      - name: 🔄 Terraform Init
         working-directory: infra
         run: terraform init
 
-      - name: Terraform Plan
+      - name: 📋 Terraform Plan
         working-directory: infra
-        run: terraform plan -var="image_tag=${{ github.sha }}"
+        run: |
+          echo "## 📋 Infrastructure Plan" >> $GITHUB_STEP_SUMMARY
+          terraform plan -var="image_tag=${{ github.sha }}" -no-color | tee plan.txt
+          
+          # Extract resource counts
+          TO_ADD=$(grep -o "Plan: [0-9]* to add" plan.txt | grep -o "[0-9]*" || echo "0")
+          TO_CHANGE=$(grep -o "[0-9]* to change" plan.txt | grep -o "[0-9]*" || echo "0")
+          TO_DESTROY=$(grep -o "[0-9]* to destroy" plan.txt | grep -o "[0-9]*" || echo "0")
+          
+          echo "### 📊 Resource Changes" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ **To Add:** $TO_ADD resources" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔄 **To Change:** $TO_CHANGE resources" >> $GITHUB_STEP_SUMMARY
+          echo "- ❌ **To Destroy:** $TO_DESTROY resources" >> $GITHUB_STEP_SUMMARY
 
-      - name: Login to ECR
+      - name: 💰 Cost Estimate
+        if: ${{ github.event.inputs.show_cost_estimate == 'true' || github.event_name == 'push' }}
+        working-directory: infra
+        run: |
+          echo "## 💰 Estimated Monthly Costs" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Estimated Cost/Month |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|---------------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ECS Fargate (0.25 vCPU, 0.5GB) | ~$30-50 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Application Load Balancer | ~$20 |" >> $GITHUB_STEP_SUMMARY
+          echo "| NAT Gateways (2x) | ~$90 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Elastic IPs (2x) | ~$7 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Secrets Manager | ~$1 |" >> $GITHUB_STEP_SUMMARY
+          echo "| CloudWatch Logs | ~$2 |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Total Estimated** | **~$150-170/month** |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "💡 **Cost Optimization Tips:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Use single NAT Gateway to save ~$45/month (reduces availability)" >> $GITHUB_STEP_SUMMARY
+          echo "- Scale down ECS during off-hours" >> $GITHUB_STEP_SUMMARY
+
+      - name: 🐳 Login to ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and Push Docker Image
+      - name: 🔨 Build and Push Docker Image
         run: |
           IMAGE_TAG=${{ github.sha }}
           ECR_REPO=${{ steps.login-ecr.outputs.registry }}/hello-fargate
-          echo "Building image: $ECR_REPO:$IMAGE_TAG"
+          echo "🔨 Building image: $ECR_REPO:$IMAGE_TAG"
           docker build -t $ECR_REPO:$IMAGE_TAG .
           docker push $ECR_REPO:$IMAGE_TAG
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          echo "## 🐳 Docker Image Built" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** $ECR_REPO:$IMAGE_TAG" >> $GITHUB_STEP_SUMMARY
 
-      - name: Deploy Infrastructure
+      - name: 🚀 Deploy Infrastructure
         working-directory: infra
-        run: terraform apply -auto-approve -var="image_tag=${{ env.IMAGE_TAG }}"
-
-      - name: Wait for Service Deployment
         run: |
-          echo "Waiting for ECS service to stabilize..."
+          echo "🚀 Deploying infrastructure..."
+          terraform apply -auto-approve -var="image_tag=${{ env.IMAGE_TAG }}"
+          echo "## ✅ Deployment Complete" >> $GITHUB_STEP_SUMMARY
+
+      - name: ⏳ Wait for Service Deployment
+        run: |
+          echo "⏳ Waiting for ECS service to stabilize..."
           aws ecs wait services-stable --cluster hello-fargate --services hello-fargate --region us-east-1
 
-      - name: Smoke Test - HTTP Redirect
+      - name: 🌐 Get Application URL
         working-directory: infra
         run: |
           ALB_DNS=$(terraform output -raw alb_dns_name)
-          echo "Testing HTTP redirect at: http://$ALB_DNS"
+          HTTPS_URL=$(terraform output -raw alb_https_url)
+          echo "## 🌐 Application URLs" >> $GITHUB_STEP_SUMMARY
+          echo "- **HTTPS:** $HTTPS_URL" >> $GITHUB_STEP_SUMMARY
+          echo "- **HTTP (redirects):** http://$ALB_DNS" >> $GITHUB_STEP_SUMMARY
+
+      - name: 🧪 Smoke Tests
+        working-directory: infra
+        run: |
+          ALB_DNS=$(terraform output -raw alb_dns_name)
+          
+          # Test HTTP redirect
+          echo "🧪 Testing HTTP redirect..."
           RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://$ALB_DNS/)
           if [ "$RESPONSE" = "301" ]; then
-            echo "✅ HTTP redirect working correctly"
+            echo "✅ HTTP redirect working"
           else
-            echo "❌ Expected 301 redirect, got $RESPONSE"
+            echo "❌ HTTP redirect failed"
             exit 1
           fi
-
-      - name: Smoke Test - HTTPS Application
-        working-directory: infra
-        run: |
-          ALB_DNS=$(terraform output -raw alb_dns_name)
-          echo "Testing HTTPS application at: https://$ALB_DNS"
+          
+          # Test HTTPS application
+          echo "🧪 Testing HTTPS application..."
           RESPONSE=$(curl -k -f https://$ALB_DNS/ | jq -r '.message')
           if [[ "$RESPONSE" == *"Hello World"* ]]; then
-            echo "✅ Application is running successfully!"
-            echo "Response: $RESPONSE"
+            echo "✅ Application running successfully"
           else
-            echo "❌ Unexpected response: $RESPONSE"
+            echo "❌ Application test failed"
+            exit 1
+          fi
+          
+          # Test database connection
+          echo "🧪 Testing database connection..."
+          DB_STATUS=$(curl -k -s https://$ALB_DNS/ | jq -r '.db_url_env_present')
+          if [ "$DB_STATUS" = "true" ]; then
+            echo "✅ Database connection configured"
+          else
+            echo "❌ Database connection failed"
             exit 1
           fi
 
-      - name: Test Database Connection
+      - name: 📊 Deployment Summary
         working-directory: infra
         run: |
-          ALB_DNS=$(terraform output -raw alb_dns_name)
-          DB_STATUS=$(curl -k -s https://$ALB_DNS/ | jq -r '.db_url_env_present')
-          if [ "$DB_STATUS" = "true" ]; then
-            echo "✅ Database connection string loaded from Secrets Manager"
-          else
-            echo "❌ Database connection string not found"
-            exit 1
-          fi
+          echo "## 🎉 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Status:** Successfully deployed" >> $GITHUB_STEP_SUMMARY
+          echo "🏗️ **Infrastructure:** All resources created/updated" >> $GITHUB_STEP_SUMMARY
+          echo "🐳 **Application:** Version ${{ env.IMAGE_TAG }} deployed" >> $GITHUB_STEP_SUMMARY
+          echo "🧪 **Tests:** All smoke tests passed" >> $GITHUB_STEP_SUMMARY

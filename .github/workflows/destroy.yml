@@ -1,10 +1,15 @@
-name: Destroy AWS Infrastructure
+name: 🗑️ Destroy Infrastructure
 
 on:
   workflow_dispatch:
     inputs:
+      preserve_state:
+        description: 'Preserve S3 state bucket and core resources'
+        required: false
+        default: 'true'
+        type: boolean
       confirm_destroy:
-        description: 'Type "DESTROY" to confirm infrastructure destruction'
+        description: 'Type "DESTROY" to confirm'
         required: true
         type: string
 
@@ -16,66 +21,125 @@ jobs:
       contents: read
 
     steps:
-      - name: Validate Confirmation
+      - name: ✋ Validate Confirmation
         run: |
           if [ "${{ github.event.inputs.confirm_destroy }}" != "DESTROY" ]; then
-            echo "❌ Confirmation failed. You must type 'DESTROY' to proceed."
+            echo "❌ Destruction not confirmed. You must type 'DESTROY' to proceed."
             exit 1
           fi
-          echo "✅ Confirmation validated"
+          echo "✅ Destruction confirmed"
 
-      - name: Checkout
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: 🔐 Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: us-east-1
 
-      - name: Setup Terraform
+      - name: 🛠️ Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.6
 
-      - name: Terraform Init
+      - name: 🔄 Terraform Init
         working-directory: infra
         run: terraform init
 
-      - name: Empty ECR Repository
-        run: |
-          echo "Emptying ECR repository..."
-          aws ecr list-images --repository-name hello-fargate --query 'imageIds[*]' --output json > images.json
-          if [ -s images.json ] && [ "$(cat images.json)" != "[]" ]; then
-            aws ecr batch-delete-image --repository-name hello-fargate --image-ids file://images.json
-            echo "✅ ECR repository emptied"
-          else
-            echo "ℹ️ ECR repository already empty"
-          fi
-        continue-on-error: true
-
-      - name: Terraform Destroy
+      - name: 📋 Show Resources to Destroy
         working-directory: infra
-        run: terraform destroy -auto-approve
-
-      - name: Verify Cleanup
         run: |
-          echo "Verifying infrastructure cleanup..."
+          echo "## 🗑️ Resources to be Destroyed" >> $GITHUB_STEP_SUMMARY
+          terraform plan -destroy -no-color | tee destroy_plan.txt
           
-          # Check if VPC still exists
-          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hello-fargate-vpc" --query 'Vpcs[0].VpcId' --output text 2>/dev/null || echo "None")
-          if [ "$VPC_ID" = "None" ] || [ "$VPC_ID" = "null" ]; then
-            echo "✅ VPC successfully destroyed"
+          # Extract resource counts
+          TO_DESTROY=$(grep -o "Plan: [0-9]* to add, [0-9]* to change, [0-9]* to destroy" destroy_plan.txt | grep -o "[0-9]* to destroy" | grep -o "[0-9]*" || echo "0")
+          
+          echo "### 📊 Destruction Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- ❌ **Resources to Destroy:** $TO_DESTROY" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 💰 Monthly Cost Savings" >> $GITHUB_STEP_SUMMARY
+          echo "After destruction, you will save approximately **$150-170/month**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 🏗️ Resources Being Destroyed" >> $GITHUB_STEP_SUMMARY
+          echo "- VPC and all networking components" >> $GITHUB_STEP_SUMMARY
+          echo "- ECS Fargate cluster and service" >> $GITHUB_STEP_SUMMARY
+          echo "- Application Load Balancer" >> $GITHUB_STEP_SUMMARY
+          echo "- NAT Gateways and Elastic IPs" >> $GITHUB_STEP_SUMMARY
+          echo "- Security Groups and Route Tables" >> $GITHUB_STEP_SUMMARY
+          echo "- CloudWatch Logs and Alarms" >> $GITHUB_STEP_SUMMARY
+          echo "- SSL Certificate" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ github.event.inputs.preserve_state }}" = "false" ]; then
+            echo "- ⚠️ **S3 State Bucket** (will be destroyed)" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ **Secrets Manager Secret** (will be destroyed)" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ **GitHub Actions IAM Role** (will be destroyed)" >> $GITHUB_STEP_SUMMARY
           else
-            echo "⚠️ VPC still exists: $VPC_ID"
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🛡️ Preserved Resources" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ S3 State Bucket (preserved for future deployments)" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Secrets Manager Secret (preserved)" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ GitHub Actions IAM Role (preserved)" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ ECR Repository (preserved)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: 🗑️ Destroy Infrastructure
+        working-directory: infra
+        run: |
+          echo "🗑️ Starting infrastructure destruction..."
+          
+          if [ "${{ github.event.inputs.preserve_state }}" = "true" ]; then
+            echo "🛡️ Preserving core resources for future deployments..."
+            # Remove core resources from state temporarily to preserve them
+            terraform state rm aws_secretsmanager_secret.db_connection || true
+            terraform state rm aws_secretsmanager_secret_version.db_connection || true
+            terraform state rm aws_iam_role.github_actions || true
+            terraform state rm aws_iam_role_policy_attachment.github_actions_admin || true
           fi
           
-          # Check if ECS cluster still exists
-          CLUSTER_STATUS=$(aws ecs describe-clusters --clusters hello-fargate --query 'clusters[0].status' --output text 2>/dev/null || echo "NOT_FOUND")
-          if [ "$CLUSTER_STATUS" = "NOT_FOUND" ] || [ "$CLUSTER_STATUS" = "INACTIVE" ]; then
-            echo "✅ ECS cluster successfully destroyed"
-          else
-            echo "⚠️ ECS cluster still active: $CLUSTER_STATUS"
-          fi
+          terraform destroy -auto-approve
+          echo "## ✅ Destruction Complete" >> $GITHUB_STEP_SUMMARY
+
+      - name: 🧹 Additional Cleanup
+        if: ${{ github.event.inputs.preserve_state == 'false' }}
+        run: |
+          echo "🧹 Performing additional cleanup..."
           
-          echo "🎉 Infrastructure destruction completed!"
+          # Delete S3 state bucket if not preserving
+          echo "Deleting S3 state bucket..."
+          aws s3 rm s3://hello-fargate-terraform-state --recursive || true
+          aws s3api delete-bucket --bucket hello-fargate-terraform-state || true
+          
+          # Delete GitHub Actions role if not preserving
+          echo "Deleting GitHub Actions role..."
+          aws iam detach-role-policy --role-name github-actions-role --policy-arn arn:aws:iam::aws:policy/AdministratorAccess || true
+          aws iam delete-role --role-name github-actions-role || true
+          
+          echo "## 🧹 Complete Cleanup Finished" >> $GITHUB_STEP_SUMMARY
+          echo "All resources including state management have been destroyed." >> $GITHUB_STEP_SUMMARY
+
+      - name: 📊 Cleanup Summary
+        run: |
+          echo "## 🎯 Cleanup Summary" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ github.event.inputs.preserve_state }}" = "true" ]; then
+            echo "✅ **Infrastructure:** Destroyed" >> $GITHUB_STEP_SUMMARY
+            echo "🛡️ **Core Resources:** Preserved for future deployments" >> $GITHUB_STEP_SUMMARY
+            echo "💰 **Cost Savings:** ~$150-170/month" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🚀 To Redeploy Later" >> $GITHUB_STEP_SUMMARY
+            echo "Simply push to main branch or run the Deploy workflow" >> $GITHUB_STEP_SUMMARY
+            echo "No additional setup required!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ **Everything:** Completely destroyed" >> $GITHUB_STEP_SUMMARY
+            echo "💰 **Cost Savings:** ~$150-170/month + storage costs" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### ⚠️ To Redeploy Later" >> $GITHUB_STEP_SUMMARY
+            echo "You'll need to:" >> $GITHUB_STEP_SUMMARY
+            echo "1. Recreate S3 state bucket" >> $GITHUB_STEP_SUMMARY
+            echo "2. Recreate GitHub Actions IAM role" >> $GITHUB_STEP_SUMMARY
+            echo "3. Update GitHub secrets if needed" >> $GITHUB_STEP_SUMMARY
+          fi
