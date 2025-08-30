@@ -43,6 +43,12 @@ Follow the detailed setup instructions below.
 - **Scheduled scaling**: Scale down during off-hours
 - **Spot instances**: For non-critical workloads
 
+## 📚 Documentation
+
+- **[🏗️ Architecture Overview](docs/ARCHITECTURE.md)** - System design and component details
+- **[🔄 CI/CD Pipeline Guide](docs/CICD-PIPELINE.md)** - Workflow configuration and processes  
+- **[🛠️ Tooling & Operations Guide](docs/TOOLING-GUIDE.md)** - Setup, commands, and troubleshooting
+
 ## Prerequisites
 
 1. **AWS Account** with appropriate permissions
