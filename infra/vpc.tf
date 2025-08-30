@@ -42,7 +42,7 @@ gateway_id = aws_internet_gateway.igw.id
 
 
 resource "aws_route_table_association" "public_assoc" {
-for_each = aws_subnet.public
-subnet_id = each.value.id
-route_table_id = aws_route_table.public.id
+  for_each       = toset(["0", "1"])
+  subnet_id      = aws_subnet.public[each.key].id
+  route_table_id = aws_route_table.public.id
 }

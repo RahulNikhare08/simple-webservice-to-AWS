@@ -11,66 +11,68 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: us-east-1
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.6.6
-
-      - name: Terraform Init
-        working-directory: infra
-        run: terraform init
-
-      - name: Import existing resources
-        working-directory: infra
+      - name: Delete AWS Resources
         run: |
-          # Get ECR repo URL for variables
-          ECR_REPO=$(aws ecr describe-repositories --repository-names hello-fargate --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "placeholder")
+          echo "Cleaning up AWS resources..."
           
-          # Try to import key resources (ignore errors if they don't exist)
-          terraform import -var="image_repo_url=$ECR_REPO" -var="image_tag=latest" aws_ecr_repository.repo hello-fargate || true
-          terraform import -var="image_repo_url=$ECR_REPO" -var="image_tag=latest" aws_vpc.main $(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hello-fargate-vpc" --query 'Vpcs[0].VpcId' --output text 2>/dev/null) || true
-
-      - name: Terraform Destroy
-        working-directory: infra
-        run: |
-          ECR_REPO=$(aws ecr describe-repositories --repository-names hello-fargate --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "placeholder")
-          terraform destroy -auto-approve \
-            -var="image_repo_url=$ECR_REPO" \
-            -var="image_tag=latest"
-
-      - name: Manual cleanup (fallback)
-        if: failure()
-        run: |
-          echo "Terraform destroy failed, attempting manual cleanup..."
-          
-          # Delete ECS service and cluster
+          # Delete ECS service first
+          echo "Deleting ECS service..."
           aws ecs update-service --cluster hello-fargate --service hello-fargate --desired-count 0 || true
+          sleep 30
           aws ecs delete-service --cluster hello-fargate --service hello-fargate || true
+          
+          # Delete ECS cluster
+          echo "Deleting ECS cluster..."
           aws ecs delete-cluster --cluster hello-fargate || true
           
-          # Delete ALB
-          ALB_ARN=$(aws elbv2 describe-load-balancers --names hello-fargate-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null)
+          # Delete ALB and target groups
+          echo "Deleting ALB..."
+          ALB_ARN=$(aws elbv2 describe-load-balancers --names hello-fargate-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null || echo "None")
           if [ "$ALB_ARN" != "None" ]; then
-            aws elbv2 delete-load-balancer --load-balancer-arn $ALB_ARN || true
+            aws elbv2 delete-load-balancer --load-balancer-arn $ALB_ARN
+            echo "Waiting for ALB deletion..."
+            sleep 60
           fi
           
-          # Delete target groups
-          aws elbv2 describe-target-groups --names hello-fargate-tg --query 'TargetGroups[0].TargetGroupArn' --output text | xargs -I {} aws elbv2 delete-target-group --target-group-arn {} || true
+          # Delete target group
+          echo "Deleting target group..."
+          TG_ARN=$(aws elbv2 describe-target-groups --names hello-fargate-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "None")
+          if [ "$TG_ARN" != "None" ]; then
+            aws elbv2 delete-target-group --target-group-arn $TG_ARN || true
+          fi
           
           # Delete ECR repository
+          echo "Deleting ECR repository..."
           aws ecr delete-repository --repository-name hello-fargate --force || true
           
-          # Delete VPC (this will cascade delete subnets, security groups, etc.)
-          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hello-fargate-vpc" --query 'Vpcs[0].VpcId' --output text 2>/dev/null)
+          # Delete VPC and associated resources
+          echo "Deleting VPC resources..."
+          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hello-fargate-vpc" --query 'Vpcs[0].VpcId' --output text 2>/dev/null || echo "None")
           if [ "$VPC_ID" != "None" ]; then
+            # Delete internet gateway
+            IGW_ID=$(aws ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=$VPC_ID" --query 'InternetGateways[0].InternetGatewayId' --output text 2>/dev/null || echo "None")
+            if [ "$IGW_ID" != "None" ]; then
+              aws ec2 detach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID || true
+              aws ec2 delete-internet-gateway --internet-gateway-id $IGW_ID || true
+            fi
+            
+            # Delete subnets
+            aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[].SubnetId' --output text | xargs -n1 aws ec2 delete-subnet --subnet-id || true
+            
+            # Delete security groups (except default)
+            aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[?GroupName!=`default`].GroupId' --output text | xargs -n1 aws ec2 delete-security-group --group-id || true
+            
+            # Delete route tables (except main)
+            aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" --query 'RouteTables[?Associations[0].Main!=`true`].RouteTableId' --output text | xargs -n1 aws ec2 delete-route-table --route-table-id || true
+            
+            # Finally delete VPC
             aws ec2 delete-vpc --vpc-id $VPC_ID || true
           fi
+          
+          echo "Cleanup completed!"
