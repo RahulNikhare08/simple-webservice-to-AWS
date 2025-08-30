@@ -13,15 +13,15 @@ tags = { Name = "${var.app_name}-igw" }
 
 
 resource "aws_subnet" "public" {
-for_each = toset([0,1])
-vpc_id = aws_vpc.main.id
-cidr_block = var.public_subnet_cidrs[each.value]
-map_public_ip_on_launch = true
-availability_zone = data.aws_availability_zones.available.names[each.value]
-tags = {
-Name = "${var.app_name}-public-${each.value}"
-"kubernetes.io/role/elb" = 1
-}
+  for_each                = toset(["0", "1"])
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs[tonumber(each.value)]
+  map_public_ip_on_launch = true
+  availability_zone       = data.aws_availability_zones.available.names[tonumber(each.value)]
+  tags = {
+    Name                     = "${var.app_name}-public-${each.value}"
+    "kubernetes.io/role/elb" = 1
+  }
 }
 
 
