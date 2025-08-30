@@ -33,7 +33,10 @@ jobs:
 
       - name: Create ECR Repository
         working-directory: infra
-        run: terraform apply -target=aws_ecr_repository.repo -auto-approve
+        run: |
+          terraform apply -target=aws_ecr_repository.repo -auto-approve \
+            -var="image_repo_url=placeholder" \
+            -var="image_tag=placeholder"
 
       - name: Login to Amazon ECR
         id: login-ecr
