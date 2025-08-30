@@ -22,6 +22,19 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: us-east-1
 
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init
+
+      - name: Create ECR Repository
+        working-directory: infra
+        run: terraform apply -target=aws_ecr_repository.repo -auto-approve
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
@@ -35,15 +48,6 @@ jobs:
           docker push $IMAGE_REPO:$IMAGE_TAG
           echo "IMAGE_REPO=$IMAGE_REPO" >> $GITHUB_ENV
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.6.6
-
-      - name: Terraform Init
-        working-directory: infra
-        run: terraform init
 
       - name: Terraform Plan
         working-directory: infra
