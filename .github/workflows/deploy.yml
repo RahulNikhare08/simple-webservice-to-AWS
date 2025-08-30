@@ -31,6 +31,10 @@ jobs:
         working-directory: infra
         run: terraform init
 
+      - name: Terraform Plan
+        working-directory: infra
+        run: terraform plan -var="image_tag=${{ github.sha }}"
+
       - name: Create ECR Repository
         working-directory: infra
         run: terraform apply -target=aws_ecr_repository.repo -auto-approve
@@ -52,11 +56,46 @@ jobs:
         working-directory: infra
         run: terraform apply -auto-approve -var="image_tag=${{ env.IMAGE_TAG }}"
 
-      - name: Test Application
+      - name: Wait for Service Deployment
+        run: |
+          echo "Waiting for ECS service to stabilize..."
+          aws ecs wait services-stable --cluster hello-fargate --services hello-fargate --region us-east-1
+
+      - name: Smoke Test - HTTP Redirect
         working-directory: infra
         run: |
           ALB_DNS=$(terraform output -raw alb_dns_name)
-          echo "Testing application at: http://$ALB_DNS"
-          sleep 60  # Wait for service to be ready
-          curl -f http://$ALB_DNS/ || exit 1
-          echo "✅ Application is running successfully!"
+          echo "Testing HTTP redirect at: http://$ALB_DNS"
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://$ALB_DNS/)
+          if [ "$RESPONSE" = "301" ]; then
+            echo "✅ HTTP redirect working correctly"
+          else
+            echo "❌ Expected 301 redirect, got $RESPONSE"
+            exit 1
+          fi
+
+      - name: Smoke Test - HTTPS Application
+        working-directory: infra
+        run: |
+          ALB_DNS=$(terraform output -raw alb_dns_name)
+          echo "Testing HTTPS application at: https://$ALB_DNS"
+          RESPONSE=$(curl -k -f https://$ALB_DNS/ | jq -r '.message')
+          if [[ "$RESPONSE" == *"Hello World"* ]]; then
+            echo "✅ Application is running successfully!"
+            echo "Response: $RESPONSE"
+          else
+            echo "❌ Unexpected response: $RESPONSE"
+            exit 1
+          fi
+
+      - name: Test Database Connection
+        working-directory: infra
+        run: |
+          ALB_DNS=$(terraform output -raw alb_dns_name)
+          DB_STATUS=$(curl -k -s https://$ALB_DNS/ | jq -r '.db_url_env_present')
+          if [ "$DB_STATUS" = "true" ]; then
+            echo "✅ Database connection string loaded from Secrets Manager"
+          else
+            echo "❌ Database connection string not found"
+            exit 1
+          fi

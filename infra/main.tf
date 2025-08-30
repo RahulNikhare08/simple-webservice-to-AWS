@@ -7,12 +7,18 @@ terraform {
       source  = "hashicorp/aws"
       version = ">= 5.0"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = ">= 4.0"
+    }
   }
 }
 
 provider "aws" {
   region = var.region
 }
+
+provider "tls" {}
 
 # Variables
 variable "region" {
@@ -62,9 +68,31 @@ resource "aws_subnet" "public" {
   tags = { Name = "${var.app_name}-public-${count.index}" }
 }
 
+resource "aws_subnet" "private" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.${count.index + 10}.0/24"
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+  tags = { Name = "${var.app_name}-private-${count.index}" }
+}
+
 data "aws_availability_zones" "available" {}
 
-# Route Table
+# NAT Gateway
+resource "aws_eip" "nat" {
+  count  = 2
+  domain = "vpc"
+  tags = { Name = "${var.app_name}-nat-eip-${count.index}" }
+}
+
+resource "aws_nat_gateway" "nat" {
+  count         = 2
+  allocation_id = aws_eip.nat[count.index].id
+  subnet_id     = aws_subnet.public[count.index].id
+  tags = { Name = "${var.app_name}-nat-${count.index}" }
+}
+
+# Route Tables
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
   route {
@@ -74,10 +102,58 @@ resource "aws_route_table" "public" {
   tags = { Name = "${var.app_name}-public-rt" }
 }
 
+resource "aws_route_table" "private" {
+  count  = 2
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.nat[count.index].id
+  }
+  tags = { Name = "${var.app_name}-private-rt-${count.index}" }
+}
+
 resource "aws_route_table_association" "public" {
   count          = 2
   subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "private" {
+  count          = 2
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private[count.index].id
+}
+
+# Self-signed certificate
+resource "tls_private_key" "cert" {
+  algorithm = "RSA"
+  rsa_bits  = 2048
+}
+
+resource "tls_self_signed_cert" "cert" {
+  private_key_pem = tls_private_key.cert.private_key_pem
+  subject {
+    common_name = "*.elb.amazonaws.com"
+  }
+  validity_period_hours = 8760
+  allowed_uses = ["key_encipherment", "digital_signature", "server_auth"]
+}
+
+resource "aws_acm_certificate" "cert" {
+  private_key      = tls_private_key.cert.private_key_pem
+  certificate_body = tls_self_signed_cert.cert.cert_pem
+}
+
+# Secrets Manager
+resource "aws_secretsmanager_secret" "db_connection" {
+  name = "${var.app_name}-db-connection"
+}
+
+resource "aws_secretsmanager_secret_version" "db_connection" {
+  secret_id = aws_secretsmanager_secret.db_connection.id
+  secret_string = jsonencode({
+    DB_URL = "postgresql://user:password@localhost:5432/mydb"
+  })
 }
 
 # Security Groups
@@ -88,6 +164,13 @@ resource "aws_security_group" "alb" {
   ingress {
     from_port   = 80
     to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -151,6 +234,23 @@ resource "aws_lb_listener" "app" {
   protocol          = "HTTP"
 
   default_action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
+resource "aws_lb_listener" "app_https" {
+  load_balancer_arn = aws_lb.app.arn
+  port              = "443"
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS-1-2-2017-01"
+  certificate_arn   = aws_acm_certificate.cert.arn
+
+  default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
   }
@@ -169,6 +269,7 @@ resource "aws_ecs_task_definition" "app" {
   cpu                      = "256"
   memory                   = "512"
   execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn           = aws_iam_role.ecs_task.arn
 
   container_definitions = jsonencode([{
     name  = var.app_name
@@ -176,6 +277,10 @@ resource "aws_ecs_task_definition" "app" {
     portMappings = [{
       containerPort = 3000
       protocol      = "tcp"
+    }]
+    secrets = [{
+      name      = "DB_URL"
+      valueFrom = "${aws_secretsmanager_secret.db_connection.arn}:DB_URL::"
     }]
     logConfiguration = {
       logDriver = "awslogs"
@@ -197,9 +302,8 @@ resource "aws_ecs_service" "app" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = aws_subnet.public[*].id
-    security_groups  = [aws_security_group.ecs.id]
-    assign_public_ip = true
+    subnets         = aws_subnet.private[*].id
+    security_groups = [aws_security_group.ecs.id]
   }
 
   load_balancer {
@@ -208,7 +312,7 @@ resource "aws_ecs_service" "app" {
     container_port   = 3000
   }
 
-  depends_on = [aws_lb_listener.app]
+  depends_on = [aws_lb_listener.app_https]
 }
 
 # IAM Role for ECS Execution
@@ -232,6 +336,89 @@ resource "aws_iam_role_policy_attachment" "ecs_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+resource "aws_iam_role_policy" "ecs_execution_secrets" {
+  name = "${var.app_name}-execution-secrets-policy"
+  role = aws_iam_role.ecs_execution.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "secretsmanager:GetSecretValue"
+      ]
+      Resource = aws_secretsmanager_secret.db_connection.arn
+    }]
+  })
+}
+
+# IAM Role for ECS Task
+resource "aws_iam_role" "ecs_task" {
+  name = "${var.app_name}-ecs-task"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "ecs_task_secrets" {
+  name = "${var.app_name}-secrets-policy"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "secretsmanager:GetSecretValue"
+      ]
+      Resource = aws_secretsmanager_secret.db_connection.arn
+    }]
+  })
+}
+
+# CloudWatch Alarms
+resource "aws_cloudwatch_metric_alarm" "cpu_high" {
+  alarm_name          = "${var.app_name}-cpu-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/ECS"
+  period              = "300"
+  statistic           = "Average"
+  threshold           = "80"
+  alarm_description   = "This metric monitors ECS CPU utilization"
+
+  dimensions = {
+    ServiceName = aws_ecs_service.app.name
+    ClusterName = aws_ecs_cluster.main.name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "memory_high" {
+  alarm_name          = "${var.app_name}-memory-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "MemoryUtilization"
+  namespace           = "AWS/ECS"
+  period              = "300"
+  statistic           = "Average"
+  threshold           = "80"
+  alarm_description   = "This metric monitors ECS memory utilization"
+
+  dimensions = {
+    ServiceName = aws_ecs_service.app.name
+    ClusterName = aws_ecs_cluster.main.name
+  }
+}
+
 # CloudWatch Log Group
 resource "aws_cloudwatch_log_group" "app" {
   name              = "/ecs/${var.app_name}"
@@ -243,6 +430,14 @@ output "alb_dns_name" {
   value = aws_lb.app.dns_name
 }
 
+output "alb_https_url" {
+  value = "https://${aws_lb.app.dns_name}"
+}
+
 output "ecr_repository_url" {
   value = aws_ecr_repository.repo.repository_url
+}
+
+output "secrets_manager_arn" {
+  value = aws_secretsmanager_secret.db_connection.arn
 }

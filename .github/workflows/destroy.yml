@@ -1,7 +1,12 @@
-name: Destroy Infrastructure
+name: Destroy AWS Infrastructure
 
 on:
   workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: 'Type "DESTROY" to confirm infrastructure destruction'
+        required: true
+        type: string
 
 jobs:
   destroy:
@@ -11,6 +16,14 @@ jobs:
       contents: read
 
     steps:
+      - name: Validate Confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "DESTROY" ]; then
+            echo "❌ Confirmation failed. You must type 'DESTROY' to proceed."
+            exit 1
+          fi
+          echo "✅ Confirmation validated"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -29,6 +42,40 @@ jobs:
         working-directory: infra
         run: terraform init
 
+      - name: Empty ECR Repository
+        run: |
+          echo "Emptying ECR repository..."
+          aws ecr list-images --repository-name hello-fargate --query 'imageIds[*]' --output json > images.json
+          if [ -s images.json ] && [ "$(cat images.json)" != "[]" ]; then
+            aws ecr batch-delete-image --repository-name hello-fargate --image-ids file://images.json
+            echo "✅ ECR repository emptied"
+          else
+            echo "ℹ️ ECR repository already empty"
+          fi
+        continue-on-error: true
+
       - name: Terraform Destroy
         working-directory: infra
-        run: terraform destroy -auto-approve -var="image_tag=latest"
+        run: terraform destroy -auto-approve
+
+      - name: Verify Cleanup
+        run: |
+          echo "Verifying infrastructure cleanup..."
+          
+          # Check if VPC still exists
+          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hello-fargate-vpc" --query 'Vpcs[0].VpcId' --output text 2>/dev/null || echo "None")
+          if [ "$VPC_ID" = "None" ] || [ "$VPC_ID" = "null" ]; then
+            echo "✅ VPC successfully destroyed"
+          else
+            echo "⚠️ VPC still exists: $VPC_ID"
+          fi
+          
+          # Check if ECS cluster still exists
+          CLUSTER_STATUS=$(aws ecs describe-clusters --clusters hello-fargate --query 'clusters[0].status' --output text 2>/dev/null || echo "NOT_FOUND")
+          if [ "$CLUSTER_STATUS" = "NOT_FOUND" ] || [ "$CLUSTER_STATUS" = "INACTIVE" ]; then
+            echo "✅ ECS cluster successfully destroyed"
+          else
+            echo "⚠️ ECS cluster still active: $CLUSTER_STATUS"
+          fi
+          
+          echo "🎉 Infrastructure destruction completed!"
