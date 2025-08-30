@@ -29,9 +29,48 @@ jobs:
         working-directory: infra
         run: terraform init
 
+      - name: Import existing resources
+        working-directory: infra
+        run: |
+          # Get ECR repo URL for variables
+          ECR_REPO=$(aws ecr describe-repositories --repository-names hello-fargate --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "placeholder")
+          
+          # Try to import key resources (ignore errors if they don't exist)
+          terraform import -var="image_repo_url=$ECR_REPO" -var="image_tag=latest" aws_ecr_repository.repo hello-fargate || true
+          terraform import -var="image_repo_url=$ECR_REPO" -var="image_tag=latest" aws_vpc.main $(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hello-fargate-vpc" --query 'Vpcs[0].VpcId' --output text 2>/dev/null) || true
+
       - name: Terraform Destroy
         working-directory: infra
         run: |
+          ECR_REPO=$(aws ecr describe-repositories --repository-names hello-fargate --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "placeholder")
           terraform destroy -auto-approve \
-            -var="image_repo_url=placeholder" \
-            -var="image_tag=placeholder"
+            -var="image_repo_url=$ECR_REPO" \
+            -var="image_tag=latest"
+
+      - name: Manual cleanup (fallback)
+        if: failure()
+        run: |
+          echo "Terraform destroy failed, attempting manual cleanup..."
+          
+          # Delete ECS service and cluster
+          aws ecs update-service --cluster hello-fargate --service hello-fargate --desired-count 0 || true
+          aws ecs delete-service --cluster hello-fargate --service hello-fargate || true
+          aws ecs delete-cluster --cluster hello-fargate || true
+          
+          # Delete ALB
+          ALB_ARN=$(aws elbv2 describe-load-balancers --names hello-fargate-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null)
+          if [ "$ALB_ARN" != "None" ]; then
+            aws elbv2 delete-load-balancer --load-balancer-arn $ALB_ARN || true
+          fi
+          
+          # Delete target groups
+          aws elbv2 describe-target-groups --names hello-fargate-tg --query 'TargetGroups[0].TargetGroupArn' --output text | xargs -I {} aws elbv2 delete-target-group --target-group-arn {} || true
+          
+          # Delete ECR repository
+          aws ecr delete-repository --repository-name hello-fargate --force || true
+          
+          # Delete VPC (this will cascade delete subnets, security groups, etc.)
+          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hello-fargate-vpc" --query 'Vpcs[0].VpcId' --output text 2>/dev/null)
+          if [ "$VPC_ID" != "None" ]; then
+            aws ec2 delete-vpc --vpc-id $VPC_ID || true
+          fi
