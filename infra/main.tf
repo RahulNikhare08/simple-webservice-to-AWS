@@ -423,6 +423,43 @@ resource "aws_cloudwatch_log_group" "app" {
   retention_in_days = 7
 }
 
+# Use existing GitHub OIDC Provider
+data "aws_iam_openid_connect_provider" "github" {
+  url = "https://token.actions.githubusercontent.com"
+}
+
+# IAM Role for GitHub Actions
+resource "aws_iam_role" "github_actions" {
+  name = "github-actions-role"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = data.aws_iam_openid_connect_provider.github.arn
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = "repo:*/simple-webservice-to-AWS:*"
+          }
+        }
+      }
+    ]
+  })
+}
+
+# Attach AdministratorAccess policy (for demo - use more restrictive in production)
+resource "aws_iam_role_policy_attachment" "github_actions_admin" {
+  role       = aws_iam_role.github_actions.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
 # Outputs
 output "alb_dns_name" {
   value = aws_lb.app.dns_name
@@ -446,4 +483,8 @@ output "cluster_name" {
 
 output "service_name" {
   value = aws_ecs_service.app.name
+}
+
+output "github_actions_role_arn" {
+  value = aws_iam_role.github_actions.arn
 }
