@@ -6,6 +6,6 @@ vpc_cidr = "10.0.0.0/16"
 public_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
 container_port = 3000
 desired_count = 1
-image_repo_url = "123456789012.dkr.ecr.us-east-1.amazonaws.com/hello-fargate"
+image_repo_url = "172571130712.dkr.ecr.us-east-1.amazonaws.com/hello-fargate"
 image_tag = "latest"
 db_connection_string = "postgres://user:pass@host:5432/db"
