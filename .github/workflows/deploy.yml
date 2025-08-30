@@ -3,6 +3,12 @@ name: 🚀 Deploy to AWS
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '*.md'
+      - '.gitignore'
+      - 'LICENSE'
   workflow_dispatch:
     inputs:
       show_cost_estimate:
