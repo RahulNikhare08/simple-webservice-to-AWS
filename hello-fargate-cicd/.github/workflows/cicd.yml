@@ -31,7 +31,7 @@ jobs:
           IMAGE_TAG=${{ github.sha }}
           IMAGE_REPO=${{ steps.login-ecr.outputs.registry }}/hello-fargate
           echo "Pushing image: $IMAGE_REPO:$IMAGE_TAG"
-          docker build -t $IMAGE_REPO:$IMAGE_TAG ./app
+          docker build -f ../Dockerfile -t $IMAGE_REPO:$IMAGE_TAG .
           docker push $IMAGE_REPO:$IMAGE_TAG
           echo "IMAGE_REPO=$IMAGE_REPO" >> $GITHUB_ENV
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
