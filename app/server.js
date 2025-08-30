@@ -11,7 +11,7 @@ const server = http.createServer((req, res) => {
     db_url_env_present: !!process.env.DB_URL,
     db_url: dbUrl.includes('password') ? '[REDACTED]' : dbUrl,
     time: new Date().toISOString(),
-    version: '1.0.1'
+    version: '1.0.2'
   }));
 });
 
