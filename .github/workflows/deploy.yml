@@ -43,6 +43,38 @@ jobs:
         working-directory: infra
         run: terraform init
 
+      - name: 🔄 Import Existing Resources
+        working-directory: infra
+        run: |
+          echo "🔄 Checking for existing resources to import..."
+          
+          # Import GitHub Actions role if it exists but not in state
+          if ! terraform state show aws_iam_role.github_actions > /dev/null 2>&1; then
+            if aws iam get-role --role-name github-actions-role > /dev/null 2>&1; then
+              echo "Importing GitHub Actions role..."
+              terraform import aws_iam_role.github_actions github-actions-role
+            fi
+          fi
+          
+          # Import Secrets Manager secret if it exists but not in state
+          if ! terraform state show aws_secretsmanager_secret.db_connection > /dev/null 2>&1; then
+            SECRET_ARN=$(aws secretsmanager describe-secret --secret-id hello-fargate-db-connection --query 'ARN' --output text 2>/dev/null || echo "")
+            if [ ! -z "$SECRET_ARN" ] && [ "$SECRET_ARN" != "None" ]; then
+              echo "Importing Secrets Manager secret..."
+              terraform import aws_secretsmanager_secret.db_connection "$SECRET_ARN"
+            fi
+          fi
+          
+          # Import IAM policy attachment if it exists but not in state
+          if ! terraform state show aws_iam_role_policy_attachment.github_actions_admin > /dev/null 2>&1; then
+            if aws iam list-attached-role-policies --role-name github-actions-role --query 'AttachedPolicies[?PolicyArn==`arn:aws:iam::aws:policy/AdministratorAccess`]' --output text | grep -q "AdministratorAccess"; then
+              echo "Importing IAM policy attachment..."
+              terraform import aws_iam_role_policy_attachment.github_actions_admin github-actions-role/arn:aws:iam::aws:policy/AdministratorAccess
+            fi
+          fi
+          
+          echo "✅ Resource import check complete"
+
       - name: 📋 Terraform Plan
         working-directory: infra
         run: |
