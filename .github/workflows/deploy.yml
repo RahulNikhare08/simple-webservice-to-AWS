@@ -35,10 +35,6 @@ jobs:
         working-directory: infra
         run: terraform plan -var="image_tag=${{ github.sha }}"
 
-      - name: Create ECR Repository
-        working-directory: infra
-        run: terraform apply -target=aws_ecr_repository.repo -auto-approve
-
       - name: Login to ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2

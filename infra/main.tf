@@ -37,11 +37,9 @@ variable "image_tag" {
   default     = "latest"
 }
 
-# ECR Repository
-resource "aws_ecr_repository" "repo" {
-  name                 = var.app_name
-  image_tag_mutability = "MUTABLE"
-  force_delete         = true
+# ECR Repository - use existing one
+data "aws_ecr_repository" "repo" {
+  name = var.app_name
 }
 
 # VPC
@@ -273,7 +271,7 @@ resource "aws_ecs_task_definition" "app" {
 
   container_definitions = jsonencode([{
     name  = var.app_name
-    image = "${aws_ecr_repository.repo.repository_url}:${var.image_tag}"
+    image = "${data.aws_ecr_repository.repo.repository_url}:${var.image_tag}"
     portMappings = [{
       containerPort = 3000
       protocol      = "tcp"
@@ -435,7 +433,7 @@ output "alb_https_url" {
 }
 
 output "ecr_repository_url" {
-  value = aws_ecr_repository.repo.repository_url
+  value = data.aws_ecr_repository.repo.repository_url
 }
 
 output "secrets_manager_arn" {
