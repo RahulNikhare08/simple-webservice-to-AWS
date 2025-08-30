@@ -12,6 +12,12 @@ terraform {
       version = ">= 4.0"
     }
   }
+  
+  backend "s3" {
+    bucket = "hello-fargate-terraform-state"
+    key    = "terraform.tfstate"
+    region = "us-east-1"
+  }
 }
 
 provider "aws" {
