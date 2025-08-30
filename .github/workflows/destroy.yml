@@ -12,6 +12,11 @@ on:
         description: 'Type "DESTROY" to confirm'
         required: true
         type: string
+      force_cleanup:
+        description: 'Force cleanup of stuck resources'
+        required: false
+        default: 'false'
+        type: boolean
 
 jobs:
   destroy:
@@ -47,6 +52,28 @@ jobs:
         working-directory: infra
         run: terraform init
 
+      - name: 📊 Current Infrastructure Status
+        working-directory: infra
+        run: |
+          echo "## 📊 Current Infrastructure" >> $GITHUB_STEP_SUMMARY
+          
+          # Get current resource count
+          CURRENT_RESOURCES=$(terraform state list | wc -l)
+          echo "- **Current Resources in State:** $CURRENT_RESOURCES" >> $GITHUB_STEP_SUMMARY
+          
+          # Check if infrastructure is actually running
+          if aws ecs describe-clusters --clusters hello-fargate --query 'clusters[0].status' --output text 2>/dev/null | grep -q "ACTIVE"; then
+            echo "- **ECS Cluster:** 🟢 Active" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **ECS Cluster:** 🔴 Not found" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if aws elbv2 describe-load-balancers --names hello-fargate-alb --query 'LoadBalancers[0].State.Code' --output text 2>/dev/null | grep -q "active"; then
+            echo "- **Load Balancer:** 🟢 Active" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Load Balancer:** 🔴 Not found" >> $GITHUB_STEP_SUMMARY
+          fi
+
       - name: 📋 Show Resources to Destroy
         working-directory: infra
         run: |
@@ -77,6 +104,7 @@ jobs:
             echo "- ⚠️ **S3 State Bucket** (will be destroyed)" >> $GITHUB_STEP_SUMMARY
             echo "- ⚠️ **Secrets Manager Secret** (will be destroyed)" >> $GITHUB_STEP_SUMMARY
             echo "- ⚠️ **GitHub Actions IAM Role** (will be destroyed)" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ **ECR Repository** (will be destroyed)" >> $GITHUB_STEP_SUMMARY
           else
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### 🛡️ Preserved Resources" >> $GITHUB_STEP_SUMMARY
@@ -103,10 +131,48 @@ jobs:
           terraform destroy -auto-approve
           echo "## ✅ Destruction Complete" >> $GITHUB_STEP_SUMMARY
 
+      - name: 🧹 Force Cleanup Stuck Resources
+        if: ${{ github.event.inputs.force_cleanup == 'true' }}
+        run: |
+          echo "🧹 Force cleaning potentially stuck resources..."
+          
+          # Clean up any remaining NAT Gateways
+          echo "Checking for remaining NAT Gateways..."
+          aws ec2 describe-nat-gateways --filter "Name=tag:Name,Values=hello-fargate-nat-*" --query 'NatGateways[?State==`available`].NatGatewayId' --output text | while read nat_id; do
+            if [ ! -z "$nat_id" ]; then
+              echo "Deleting NAT Gateway: $nat_id"
+              aws ec2 delete-nat-gateway --nat-gateway-id $nat_id || true
+            fi
+          done
+          
+          # Clean up any remaining Elastic IPs
+          echo "Checking for remaining Elastic IPs..."
+          aws ec2 describe-addresses --filters "Name=tag:Name,Values=hello-fargate-nat-eip-*" --query 'Addresses[].AllocationId' --output text | while read eip_id; do
+            if [ ! -z "$eip_id" ]; then
+              echo "Releasing Elastic IP: $eip_id"
+              aws ec2 release-address --allocation-id $eip_id || true
+            fi
+          done
+          
+          # Clean up any remaining security groups
+          echo "Checking for remaining security groups..."
+          aws ec2 describe-security-groups --filters "Name=group-name,Values=hello-fargate-*" --query 'SecurityGroups[].GroupId' --output text | while read sg_id; do
+            if [ ! -z "$sg_id" ]; then
+              echo "Deleting Security Group: $sg_id"
+              aws ec2 delete-security-group --group-id $sg_id || true
+            fi
+          done
+          
+          echo "## 🧹 Force Cleanup Complete" >> $GITHUB_STEP_SUMMARY
+
       - name: 🧹 Additional Cleanup
         if: ${{ github.event.inputs.preserve_state == 'false' }}
         run: |
           echo "🧹 Performing additional cleanup..."
+          
+          # Delete ECR repository and images
+          echo "Deleting ECR repository..."
+          aws ecr delete-repository --repository-name hello-fargate --force || true
           
           # Delete S3 state bucket if not preserving
           echo "Deleting S3 state bucket..."
@@ -118,8 +184,36 @@ jobs:
           aws iam detach-role-policy --role-name github-actions-role --policy-arn arn:aws:iam::aws:policy/AdministratorAccess || true
           aws iam delete-role --role-name github-actions-role || true
           
+          # Delete OIDC provider if no other roles use it
+          echo "Checking OIDC provider usage..."
+          OIDC_USAGE=$(aws iam list-roles --query 'Roles[?contains(AssumeRolePolicyDocument, `token.actions.githubusercontent.com`)]' --output text | wc -l)
+          if [ "$OIDC_USAGE" -eq "0" ]; then
+            echo "Deleting unused OIDC provider..."
+            aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):oidc-provider/token.actions.githubusercontent.com" || true
+          fi
+          
           echo "## 🧹 Complete Cleanup Finished" >> $GITHUB_STEP_SUMMARY
           echo "All resources including state management have been destroyed." >> $GITHUB_STEP_SUMMARY
+
+      - name: 🔍 Verify Cleanup
+        run: |
+          echo "🔍 Verifying cleanup completion..."
+          
+          # Check for remaining resources
+          REMAINING_VPCS=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=hello-fargate-vpc" --query 'Vpcs' --output text | wc -l)
+          REMAINING_CLUSTERS=$(aws ecs describe-clusters --clusters hello-fargate --query 'clusters[?status==`ACTIVE`]' --output text 2>/dev/null | wc -l || echo "0")
+          REMAINING_ALBS=$(aws elbv2 describe-load-balancers --names hello-fargate-alb --query 'LoadBalancers' --output text 2>/dev/null | wc -l || echo "0")
+          
+          echo "## 🔍 Cleanup Verification" >> $GITHUB_STEP_SUMMARY
+          echo "- **VPCs:** $REMAINING_VPCS remaining" >> $GITHUB_STEP_SUMMARY
+          echo "- **ECS Clusters:** $REMAINING_CLUSTERS remaining" >> $GITHUB_STEP_SUMMARY
+          echo "- **Load Balancers:** $REMAINING_ALBS remaining" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$REMAINING_VPCS" -eq "0" ] && [ "$REMAINING_CLUSTERS" -eq "0" ] && [ "$REMAINING_ALBS" -eq "0" ]; then
+            echo "- ✅ **Status:** All infrastructure successfully destroyed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⚠️ **Status:** Some resources may still be terminating" >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: 📊 Cleanup Summary
         run: |
@@ -138,8 +232,6 @@ jobs:
             echo "💰 **Cost Savings:** ~$150-170/month + storage costs" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### ⚠️ To Redeploy Later" >> $GITHUB_STEP_SUMMARY
-            echo "You'll need to:" >> $GITHUB_STEP_SUMMARY
-            echo "1. Recreate S3 state bucket" >> $GITHUB_STEP_SUMMARY
-            echo "2. Recreate GitHub Actions IAM role" >> $GITHUB_STEP_SUMMARY
-            echo "3. Update GitHub secrets if needed" >> $GITHUB_STEP_SUMMARY
+            echo "Run the setup script: \`./setup.sh\`" >> $GITHUB_STEP_SUMMARY
+            echo "Then push to main branch to deploy" >> $GITHUB_STEP_SUMMARY
           fi
